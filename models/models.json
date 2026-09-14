@@ -1,0 +1,143 @@
+{
+  "models": [
+    {
+      "id": "kimi_k3",
+      "display": "Kimi-K3",
+      "hidden": 7168,
+      "gemm": {
+        "layer": "o_proj",
+        "N": 7168,
+        "K": 12288,
+        "why": "规则1首选：decode 每层必经的 attention 输出投影，N=hidden=7168、K=H*D=96*128=12288；KDA(69层) 与 MLA(24层) 的 o_proj 是同一个 [7168,12288]，一个形状覆盖全部 93 层；权重 88080384 B(fp8) 纯带宽受限，N/K 均为 128 倍数，无需 pad"
+      },
+      "alt": [
+        {
+          "layer": "fused_qkvg (KDA 输入投影, 模型内最大单权重)",
+          "N": 49152,
+          "K": 7168
+        },
+        {
+          "layer": "q_b (MLA q_lora 上投影, 窄 K)",
+          "N": 18432,
+          "K": 1536
+        }
+      ],
+      "source": {
+        "file": "/home/admin/workspace/hengfeng_data/weave_new/DSA-learn/baselines/h100/kimi_k3/full_attention_benchmark.py",
+        "lines": "常量 BM:L69-88(HIDDEN=7168 L69; H_KDA=H_MLA=96 L70-71; D=128 L72; HD_KDA=HD_MLA=12288 L73-74; MLA_QK=192 L80; MLA_Q_LORA=1536 L82); WEIGHT_SHAPES_KDA BM:L117-127(fused_qkvg=(4*HD_KDA,HIDDEN)=[49152,7168] L118; o_proj=(HIDDEN,HD_KDA)=[7168,12288] L126); WEIGHT_SHAPES_MLA BM:L129-137(q_b=(H_MLA*MLA_QK,MLA_Q_LORA)=[18432,1536] L132; o_proj=(HIDDEN,HD_MLA)=[7168,12288] L136); W=[N,K]/y=x@W.T 约定 BM:L114 + 自检 BM:L3001-3005; harness 自断言 BM:L2982(fused_qkvg),L2990(KDA o_proj),L2994,L3008(q_b),L2997(MLA o_proj),L3012; decode 调用点: KDA _kda_project_production BM:L838 内 decode 分支 L867 -> fused_qkvg L879/L885, kda_full_forward BM:L1019 -> kda_o_proj L1071-1072; MLA mla_decode_forward BM:L1527 -> q_b L1562, mla_o_proj L1610-1611; decode case B=64 Q=2 BM:L109; display 名 BM:L1742"
+      }
+    },
+    {
+      "id": "qwen36",
+      "display": "Qwen3.6-35B-A3B",
+      "hidden": 2048,
+      "gemm": {
+        "layer": "o_weight (GDN/dense 输出投影)",
+        "N": 2048,
+        "K": 4096,
+        "why": "规则1首选：decode 每层必经的输出投影，N=hidden=2048、K=4096；GDN(30/40层) 的 K=GDN_V_DIM=32*128 与 dense(10/40层) 的 K=DENSE_Q_DIM=16*256 恰好都等于 4096，一个形状覆盖两个变体；本组唯一的 N=2048 小 N 形状(仅 16 个 128-tile / 32 个 BM=64 tile)，是 S6 splitk 的目标用例；N/K 均为 128 倍数，无需 pad"
+      },
+      "alt": [
+        {
+          "layer": "qkvz_weight (GDN fused in_proj_qkvz)",
+          "N": 12288,
+          "K": 2048
+        },
+        {
+          "layer": "q_weight (dense query+output_gate 融合)",
+          "N": 8192,
+          "K": 2048
+        }
+      ],
+      "source": {
+        "file": "/home/admin/workspace/hengfeng_data/weave_new/DSA-learn/baselines/h100/qwen36/full_attention_benchmark.py",
+        "lines": "常量 BM:L37-61(MODEL_NAME L37; HIDDEN_SIZE=2048 L38; GDN_H_QK=16/GDN_H_V=32/GDN_D=128 L44-46; GDN_QK_DIM=2048 L47; GDN_V_DIM=4096 L48; GDN_QKV_DIM=8192 L49; DENSE_H_Q=16/DENSE_H_KV=2/DENSE_D=256 L53-55; DENSE_Q_DIM=4096 L56; DENSE_KV_DIM=512 L57; LAYER_COUNTS gdn30/dense10 L61); make_gdn_layer BM:L264-295(qkv_weight=(GDN_QKV_DIM,HIDDEN) L267; z_weight=(GDN_V_DIM,HIDDEN) L268; o_weight=(HIDDEN,GDN_V_DIM)=[2048,4096] L282; qkvz_weight=cat(...,dim=0)=[12288,2048] L287-288, 注释 L285 明确 in_proj_qkvz N=12288); make_dense_layer BM:L314-324(q_weight=(2*DENSE_Q_DIM,HIDDEN)=[8192,2048] L318; o_weight=(HIDDEN,DENSE_Q_DIM)=[2048,4096] L323); F.linear 即 y=x@W.T / W=[N,K]; decode 调用点: _forward_gdn_decode BM:L462 -> qkvz_weight L479, output_projection o_weight L523-529; _forward_dense_decode BM:L1056 -> q_weight L1072, output_projection o_weight L1115-1119; decode case batch=64 q_len=2 BM:L84-89, 两 Q=1 步断言 L466-467/L1062-1063"
+      }
+    },
+    {
+      "id": "glm52",
+      "display": "GLM-5.2",
+      "hidden": 6144,
+      "gemm": {
+        "layer": "wo (final_o_projection)",
+        "N": 6144,
+        "K": 16384,
+        "why": "规则1首选：最终输出投影 wo，decode 每个 Q=1 步必经，N=hidden=6144、K=H_Q*V_HEAD_D=64*256=16384；注意源码按转置 [K,N]=[16384,6144] 存储并以 x@W 调用(L1044)，换算到 CONTRACT §1 的 W[N,K] 约定才是 N=6144/K=16384；权重 100663296 B(fp8)，与既有工作 N=6144/K=7168 同族但 K 更长；N/K 均为 128 倍数，无需 pad"
+      },
+      "alt": [
+        {
+          "layer": "wq_b (q_lora 上投影, 大 N 窄 K)",
+          "N": 16384,
+          "K": 2048
+        },
+        {
+          "layer": "wq_a (q_lora 下投影, 小 N)",
+          "N": 2048,
+          "K": 6144
+        }
+      ],
+      "source": {
+        "file": "/home/admin/workspace/hengfeng_data/weave_new/DSA-learn/baselines/h100/glm52/full_attention_benchmark.py",
+        "lines": "常量 BM:L56-74(HIDDEN=6144 L56; Q_LORA=2048 L57; H_Q=64 L58; Q_NOPE=192 L59; ROPE_D=64 L60; Q_HEAD_D=Q_NOPE+ROPE_D=256 L61; LATENT_D=512 L62; MLA_D=576 L63; V_HEAD_D=256 L64; NUM_LAYERS=78 L70; NUM_FULL_INDEX=21 L71; NUM_SHARED_INDEX=57 L72); make_weights BM:L104-121(wq_a=scaled_randn(HIDDEN,Q_LORA) L107; wq_b=scaled_randn(Q_LORA,H_Q*Q_HEAD_D) L109; wkv_a=scaled_randn(HIDDEN,MLA_D) L110; wo=scaled_randn(H_Q*V_HEAD_D,HIDDEN) L115; index_wq_b L116); 存储约定为 [in,out] 且以 x@W 调用: wq_a BM:L796, wq_b BM:L798, wkv_a BM:L802, index_wq_b BM:L860(full_index 分支 L856), wo BM:L1044(final_hidden=reconstructed.reshape(tokens,H_Q*V_HEAD_D)@w['wo'] -> view(batch,q_len,HIDDEN) L1045); 独立 fp32 参考同形状 BM:L1678,L1686,L1689,L1756; decode 路径: _forward_layer_one BM:L785(decode 要求 q_len==1, L789-790) 由 forward_layer BM:L1187 对 decode 拆成两个 Q=1 步调用 L1190-1202; stage 名 final_o_projection BM:L1043; decode case batch=64 q_len=2 BM:L85; display 名 BM:L2185"
+      }
+    },
+    {
+      "id": "deepseek_v4_pro",
+      "display": "DeepSeek-V4-Pro",
+      "hidden": 7168,
+      "gemm": {
+        "layer": "wo_b (grouped 低秩 o_proj 的第二级)",
+        "N": 7168,
+        "K": 16384,
+        "why": "规则1+规则2同时满足：DSV4 的 o_proj 是 grouped 低秩两级 wo_a->wo_b，wo_b 是唯一直接产出 hidden 的单个稠密 GEMM，也是 decode 路径上权重字节最大的单个 GEMM(117440512 B fp8 > wo_a 的 67108864 B)；N=hidden=7168、K=O_GROUPS*O_LORA=16*1024=16384；源码本身就走 fp8 D=x@W^T、W=[N,K]、per-128(K) scale(L525-544, L445-457)，与 CONTRACT §1 完全同构；N/K 均为 128 倍数，无需 pad"
+      },
+      "alt": [
+        {
+          "layer": "wq_b (q_lora 上投影, N=65536 超大 N)",
+          "N": 65536,
+          "K": 1536
+        },
+        {
+          "layer": "wqkv_a_fp8 (fused q_a+kv 下投影, 小 N)",
+          "N": 2048,
+          "K": 7168
+        }
+      ],
+      "source": {
+        "file": "/home/admin/workspace/hengfeng_data/weave_new/DSA-learn/baselines/h100/deepseek_v4_pro/full_attention_benchmark.py",
+        "lines": "常量 BM:L63-80(HIDDEN=7168 L63; H_Q=128 L64; HEAD_D=512 L65; QK_NOPE_D=448 L66; QK_ROPE_D=64 L67; V_HEAD_D=512 L68; Q_LORA=1536 L69; O_GROUPS=16 L70; O_LORA=1024 L71; HCA_LAYERS=31 L78; CSA_LAYERS=30 L79); GRAN_K=128 BM:L111; _make_common_weights BM:L1469-1525(wq_a=_randn(Q_LORA,HIDDEN) L1474; wq_b_raw=_randn(H_Q*HEAD_D,Q_LORA)=[65536,1536] L1475; wkv_raw=_randn(HEAD_D,HIDDEN)=[512,7168] L1476; per_group_d=(H_Q//O_GROUPS)*HEAD_D=4096 L1477; wo_a_raw=_randn(O_GROUPS,O_LORA,per_group_d)=[16,1024,4096] L1478; wo_b_raw=_randn(HIDDEN,O_GROUPS*O_LORA)=[7168,16384] L1479; wqkv_a_fp8=quant(cat([wq_a,wkv_raw],dim=0))=[2048,7168] L1506-1508; wo_b_fp8=quant(wo_b_raw) L1512); 约定: _quantize_weight_fp8 文档串明确输入是 [N,K] 权重 BM:L445-447; _fp8_gemm_prod 'D = x @ W^T', n=W.shape[0] BM:L525-532; _fp8_gemm_ref (x_deq @ w_deq.t()) BM:L547-555; grouped wo_a einsum 'bhr,hdr->bhd' BM:L1369-1408; decode 调用点: _layer_forward_decode BM:L2368(两个 Q=1 步 L2371,L2384,L2397) -> wqkv_a_fp8 L2403, wq_b_fp8 L2407, grouped wo_a L2583-2585, wo_b L2586; prefill 对应 L2098,L2103,L2307-2311; harness 静态自检 shape_checks BM:L3677-3683(HIDDEN==7168, H_Q==128, HEAD_D==512, Q_LORA==1536, O_GROUPS==16, O_LORA==1024) 与 L3688(HCA_LAYERS+CSA_LAYERS==61); CSA indexer 候选(未选) BM:L1564-1566(idx_wq_b=[8192,1536], w_proj=[64,7168], idx_comp=[512,7168]), compressor BM:L1533/L1555(w_comp=[HCA_COMP_OUT=1024|CSA_COMP_OUT=2048, 7168], 常量 L84-88); decode case batch=64 q_len=2 BM:L130; display 名 BM:L3834"
+      }
+    },
+    {
+      "id": "minimax_m3",
+      "display": "MiniMax-M3",
+      "hidden": 6144,
+      "gemm": {
+        "layer": "w_o (o_proj)",
+        "N": 6144,
+        "K": 8192,
+        "why": "规则1首选：decode 每层必经的 attention 输出投影 w_o=[6144,8192]，N=hidden=6144、K=H_Q*D=64*128=8192；sparse(57/60层) 与 dense(3/60层) 共用同一个 w_o，一个形状覆盖全部 60 层；与既有工作 N=6144/K=7168 同族(可直接对照 reference 结果)，权重 50331648 B(fp8)；N/K 均为 128 倍数，无需 pad"
+      },
+      "alt": [
+        {
+          "layer": "w_qkv_idx_fused (sparse 单融合 QKV+index 投影)",
+          "N": 9856,
+          "K": 6144
+        },
+        {
+          "layer": "w_qkv_fused (dense 主 QKV 投影)",
+          "N": 9216,
+          "K": 6144
+        }
+      ],
+      "source": {
+        "file": "/home/admin/workspace/hengfeng_data/weave_new/DSA-learn/baselines/h100/minimax_m3/full_attention_benchmark.py",
+        "lines": "常量 BM:L185-208(HIDDEN=6144 L185; H_Q=64 L186; H_KV=4 L187; H_IDX=4 L188; H_IDX_K=1 L189; D=128 L190; DENSE_LAYERS=3 L199; SPARSE_LAYERS=57 L200; PROJ_MAIN_DIM=H_Q*D+2*H_KV*D=9216 L204; PROJ_IDX_DIM=H_IDX*D+H_IDX_K*D=640 L206; PROJ_FUSED_DIM=9856 L208); make_layer_weights BM:L725-745(w_q=[8192,6144] L730; w_k/w_v=[512,6144] L731-732; w_o=randn(HIDDEN,H_Q*D)=[6144,8192] L733; w_idx_q=[512,6144] L735; w_idx_k=[128,6144] L736); make_fused_proj_weights BM:L696-718(w_qkv_fused=cat(w_q,w_k,w_v)=[9216,6144] L711-712; w_qkv_idx_fused=cat(w_q,w_k,w_v,w_idx_q,w_idx_k)=[9856,6144] L715-717; 文档串 L700-702); F.linear 即 y=x@W.T / W=[N,K]; decode 调用点: _trace_decode_staged BM:L2221(两个 Q=1 步 L2226) -> projection_step w_qkv_idx_fused L2229 / w_qkv_fused L2234, o_proj_step w_o L2283-2284; timing/prefill 对应 L2218(w_o),L2160,L2164; 融合等价性自检说明 L2573-2576; harness 静态自检 BM:L2822-2833(PROJ_FUSED_DIM==9856, PROJ_MAIN_DIM==9216, PROJ_IDX_DIM==640, w_fused.shape==(9856,HIDDEN), w_dense.shape==(9216,HIDDEN)) 与 L3021-3023; decode case batch=64 q_len=2 BM:L212; display 名 BM:L2335"
+      }
+    }
+  ],
+  "peak_bw": {
+    "spec_tbps": 4.0,
+    "measured_note": "见 tools/peak_bw_probe"
+  }
+}
