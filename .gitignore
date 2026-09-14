@@ -1,0 +1,7 @@
+*.o
+bench/bench_decode
+tools/peak_bw_probe
+kernels/smoke_test
+__pycache__/
+*.log
+.gpu3.lock
